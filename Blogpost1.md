@@ -1,18 +1,15 @@
----
-title: "Testing without the internet using mock functions"
-author: "Karina Marks, Gábor Csárdi"
-output: html_document
----
+# Testing without the internet using mock functions
+Karina Marks, Gabor Csardi  
 
 ## Testing
 
 At Mango we validate and test packages for our ValidR customers.
 We create unit tests for different requirements
-of functions. These tests must run on a customers machine, where internet
+of functions. These tests must run on a customer's machine, where internet
 access could be restricted; hence, all tests 
 must work - and pass - on any OS and without an internet connection. This
 creates a problem when testing packages whose main functionality is to
-connect to a server for tasks such as; web scraping or web API. The way we
+connect to a server for tasks such as web scraping or web API. The way we
 do this is by using the method of
 [mocking](https://en.wikipedia.org/wiki/Mock_object).
 
@@ -51,6 +48,13 @@ ext <- function() {
 }
 ## Test code
 library(testthat)
+```
+
+```
+## Warning: package 'testthat' was built under R version 3.2.5
+```
+
+```r
 with_mock(
   `base::system` = function(...) { return(127) },
   expect_error(ext(), "sleeping failed")
@@ -64,7 +68,7 @@ of arguments: named and unnamed. The named arguments are the mock functions,
 the names define the functions to mock. Unnamed arguments are expressions
 to evaluate in the mocked environment.
 
-## Using `with_mock` to avoid internet
+## Using `with_mock` to avoid connecting to the internet
 
 ### Example - `GET()`
 
@@ -74,21 +78,24 @@ which will perform an HTTP GET request:
 
 ```r
 library(httr)
-response <- GET("http://httpbin.org/get")
 ```
 
 ```
-## Tracing curl::curl_fetch_memory(url, handle = handle) on exit
+## Warning: package 'httr' was built under R version 3.2.5
+```
+
+```r
+response <- GET("http://httpbin.org/get")
 ```
 
 Under the hood `GET()` uses the `curl_fetch_memory()` function from the
 `curl` package, built on top of `libcurl`. The job of the `GET()` function is
 to call `curl` with the right arguments, and then process its response
-properly. So this is what we need to test. (Testing `curl` itself is
-another mocking story.)
+properly. So this is what we need to test (testing `curl` itself is
+another mocking story).
 
 If we would like to test that `GET()` works correctly, without any internet
-connection, the steps to do this are;
+connection, the steps to do this are:
 
 * Trace `curl_fetch_memory()` to see the input it receives and the
   output it generates.
@@ -216,7 +223,7 @@ test_that("Interactive is always TRUE", {
 * `on.exit()` makes sure that after the test has run, this function is
   changed back, and  `lockBinding()` seals the `base` package again.
 
-After this, mocking `browseURL()` is already easy, and we leave it
+After this, mocking `browseURL()` is easy and we leave it
 as an exercise to the reader.
 
 Note that this method is not allowed for tests in CRAN packages,

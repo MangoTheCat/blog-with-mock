@@ -1,7 +1,9 @@
 ---
 title: "Testing without the internet using mock functions"
-author: "Karina Marks, Gábor Csárdi"
-output: html_document
+author: "Karina Marks, Gabor Csardi"
+output: 
+  html_document: 
+    keep_md: yes
 ---
 
 ## Testing
