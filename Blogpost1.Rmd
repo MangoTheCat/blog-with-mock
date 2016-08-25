@@ -1,227 +1,171 @@
 ---
-title: "Testing without the internet"
-author: "Karina Marks"
+title: "Testing without the internet using mock functions"
+author: "Karina Marks, Gábor Csárdi"
 output: html_document
 ---
 
-```{r echo = FALSE, include = FALSE}
-library(testthat)
-library(httr)
-library(curl)
-```
-
 ## Testing
 
-At Mango we validate and test packages for our ValidR customers. This
-requires using `testthat` to create unit tests for different requirements
-of functions. These tests must run on a customers machine; hence, all tests
+At Mango we validate and test packages for our ValidR customers.
+We create unit tests for different requirements
+of functions. These tests must run on a customers machine, where internet
+access could be restricted; hence, all tests 
 must work - and pass - on any OS and without an internet connection. This
 creates a problem when testing packages whose main functionality is to
 connect to a server for tasks such as; web scraping or web API. The way we
-do this is by using the method of mocking.
+do this is by using the method of
+[mocking](https://en.wikipedia.org/wiki/Mock_object).
 
 
 ## Mocking
 
 Mocking allows you to replace parts of your system under test with mock
-objects and make assertions about how they have been used. It allows us to
-temporarily change a function, this is useful in our case, as we can remove
-any attempts to connect to the internet. In `testthat` we do this using the
-function `with_mock`.
+objects and make assertions about how they have been used. The `testthat`
+package supports mocking via the `with_mock()` function. `with_mock()` allows us to
+temporarily replace some R functions. In our case we replace the functions
+that connect to the internet with mock functions that only *pretend* to do
+so.
 
-### Simple Example - `print`
+### Simple Example - a system error
 
-```{r}
+Suppose we use the `system()` function to call out to the operating
+system and start some utility. This is a somewhat fragile operation, it
+might fail if the utility is not available, so we make sure that we 
+handle errors properly. This is somewhat tricky in the case of `system()` as 
+it does not signal an R error if the sytem function fails, it just 
+returns the exit status of the system shell, which is typically
+non-zero on an error.
+
+To test that errors are handled properly, we would need to create an
+environment where the system function indeed fails. While this is not
+impossible, it is much easier to just pretend that it fails using
+`with_mock()`:
+
+```{r, results = "hide"}
+## Package or script code
+ext <- function() {
+  ## This usually works, but probably not always
+  status <- system("sleep 5")
+  if (status != 0) { stop("sleeping failed") }
+}
+## Test code
+library(testthat)
 with_mock(
-  `print` = function(...) paste0("Make print work like this, and print ", ...),
-  {print("hello")}
+  `base::system` = function(...) { return(127) },
+  expect_error(ext(), "sleeping failed")
 )
-print("hello")
 ```
 
-This is a simple example where we have used `with_mock` to temporarily
-amend to the function `print`. It takes only two arguments, the first
-`print = function(...) paste0("Mak...` is amending the function `print` to
-do as we want, the second `{print("hello")}` is using this new function
-`print`. Calling this function outside of `with_mock`, will result in it
-working as it should.
+We want to test that `ext()` behaves well if a system error happens,
+and throws a proper R error. We use `with_mock()` to temporarily change
+`system()`, and pretend that it has failed. `with_mock()` takes two kinds
+of arguments: named and unnamed. The named arguments are the mock functions,
+the names define the functions to mock. Unnamed arguments are expressions
+to evaluate in the mocked environment.
 
 ## Using `with_mock` to avoid internet
 
-### Example - `GET`
-To explain this, consider the function `GET` from the `httr` package, which
-will get a URL;
+### Example - `GET()`
+
+Consider the function `GET()` from the `httr` package,
+which will perform an HTTP GET request:
 
 ```{r}
-GET("http://httpbin.org/get")
+library(httr)
+response <- GET("http://httpbin.org/get")
 ```
 
-`GET` uses different functions, which in turn use other functions to
-connect to the internet and get this URL. Thus, the connection to the
-internet doesn't occur directly from GET, but from a function
-`curl_fetch_memory` from the `curl` package, which is called much deeper
-into the code. Hence, to call the function `GET` without connecting to the
-internet we must mock the function `curl_fetch_memory`.
+Under the hood `GET()` uses the `curl_fetch_memory()` function from the
+`curl` package, built on top of `libcurl`. The job of the `GET()` function is
+to call `curl` with the right arguments, and then process its response
+properly. So this is what we need to test. (Testing `curl` itself is
+another mocking story.)
 
-We would like to test that `GET` works correctly, without any internet
+If we would like to test that `GET()` works correctly, without any internet
 connection, the steps to do this are;
 
-* Create a mocked function of `curl_fetch_memory`
-* Record the response of this function (allowing an internet connection)
-  and write it locally
-* Pass the URL to the mocked function and respond with the recorded output
-* Check `GET` (with the mocked `curl_fetch_memory`) works as it should and
-  test it
+* Trace `curl_fetch_memory()` to see the input it receives and the
+  output it generates.
+* Call `GET()` for the scenario we want to test, and record the input
+  and output of `curl_fetch_memory()`, so that we can use it to pretend an
+  internet connection later in the real test case. Study the recorded
+  input and output to see it can be reused, and update it as needed.
+* Write the test case using `with_mock()` on `curl_fetch_memory()` to
+  replace it with a mock function that checks if the input received from
+  `GET()` is correct and provide the recorded output.
 
+For brevity, let's assume that we only use the output of
+`curl_fetch_memory()` now. The input can be handled similarly.
+We trace it and record its return value:
 
-Firstly, we need to find the output to `curl_fetch_memory` which is passed
-to the function `GET`. To do this we use `trace`;
-
-```{r eval=FALSE}
-ret <- NULL
-
-trace(curl::curl_fetch_memory, exit = function() { ret <<- returnValue() })
-
-GET("http://httpbin.org/get")
-
+```{r results = "hide", message = FALSE}
+library(curl)
+cfm_output <- NULL
+trace(
+  curl_fetch_memory,
+  exit = function() { cfm_output <<- returnValue() }
+)
+response <- GET("http://httpbin.org/get")
 ```
 
-Then, `ret` is the response of `curl_fetch_memory`, when it is called by
-`GET("http://httpbin.org/get")`, so using `dput` we can copy over the
-output and save it as a variable `recorded_response`.
+The return value of `curl_fetch_memory()` is a list that contains the HTTP
+status code, headers, some timing information, and of course the content
+itself:
 
 ```{r}
-recorded_response <- structure(list(url = "http://httpbin.org/get", status_code = 200L,
-    headers = as.raw(c(0x48, 0x54, 0x54, 0x50, 0x2f, 0x31, 0x2e, 0x31, 0x20, 0x32, 0x30, 0x30, 0x20, 0x4f,
-                       0x4b, 0x0d, 0x0a, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x3a, 0x20, 0x6e, 0x67, 0x69,
-                       0x6e, 0x78, 0x0d, 0x0a, 0x44, 0x61, 0x74, 0x65, 0x3a, 0x20, 0x54, 0x75, 0x65, 0x2c,
-                       0x20, 0x31, 0x32, 0x20, 0x4a, 0x75, 0x6c, 0x20, 0x32, 0x30, 0x31, 0x36, 0x20, 0x31,
-                       0x35, 0x3a, 0x34, 0x30, 0x3a, 0x32, 0x32, 0x20, 0x47, 0x4d, 0x54, 0x0d, 0x0a, 0x43,
-                       0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x2d, 0x54, 0x79, 0x70, 0x65, 0x3a, 0x20, 0x61,
-                       0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2f, 0x6a, 0x73, 0x6f,
-                       0x6e, 0x0d, 0x0a, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x2d, 0x4c, 0x65, 0x6e,
-                       0x67, 0x74, 0x68, 0x3a, 0x20, 0x32, 0x39, 0x38, 0x0d, 0x0a, 0x43, 0x6f, 0x6e, 0x6e,
-                       0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3a, 0x20, 0x6b, 0x65, 0x65, 0x70, 0x2d, 0x61,
-                       0x6c, 0x69, 0x76, 0x65, 0x0d, 0x0a, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x2d, 0x43,
-                       0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x2d, 0x41, 0x6c, 0x6c, 0x6f, 0x77, 0x2d, 0x4f,
-                       0x72, 0x69, 0x67, 0x69, 0x6e, 0x3a, 0x20, 0x2a, 0x0d, 0x0a, 0x41, 0x63, 0x63, 0x65,
-                       0x73, 0x73, 0x2d, 0x43, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x2d, 0x41, 0x6c, 0x6c,
-                       0x6f, 0x77, 0x2d, 0x43, 0x72, 0x65, 0x64, 0x65, 0x6e, 0x74, 0x69, 0x61, 0x6c, 0x73,
-                       0x3a, 0x20, 0x74, 0x72, 0x75, 0x65, 0x0d, 0x0a, 0x0d, 0x0a)),
-    modified = structure(NA_integer_, class = c("POSIXct","POSIXt")),
-    times = structure(c(0, 0, 0.125, 0.125, 0.234, 0.234),
-                      .Names = c("redirect", "namelookup", "connect", "pretransfer",
-                                 "starttransfer", "total")),
-    content = as.raw(c(0x7b, 0x0a,0x20, 0x20, 0x22, 0x61, 0x72, 0x67, 0x73, 0x22, 0x3a, 0x20,  0x7b, 0x7d,
-                       0x2c, 0x20, 0x0a, 0x20, 0x20, 0x22, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72, 0x73, 0x22,
-                       0x3a, 0x20, 0x7b, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x22, 0x41, 0x63, 0x63, 0x65, 0x70,
-                       0x74, 0x22, 0x3a, 0x20, 0x22, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69,
-                       0x6f, 0x6e, 0x2f, 0x6a, 0x73, 0x6f, 0x6e, 0x2c, 0x20, 0x74, 0x65, 0x78, 0x74, 0x2f,
-                       0x78, 0x6d, 0x6c, 0x2c, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69,
-                       0x6f, 0x6e, 0x2f, 0x78, 0x6d, 0x6c, 0x2c, 0x20, 0x2a, 0x2f, 0x2a, 0x22, 0x2c, 0x20,
-                       0x0a, 0x20, 0x20, 0x20, 0x20, 0x22, 0x41, 0x63, 0x63, 0x65, 0x70, 0x74, 0x2d, 0x45,
-                       0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x22, 0x3a, 0x20, 0x22, 0x67, 0x7a, 0x69,
-                       0x70, 0x2c, 0x20, 0x64, 0x65, 0x66, 0x6c, 0x61, 0x74, 0x65, 0x22, 0x2c, 0x20, 0x0a,
-                       0x20, 0x20, 0x20, 0x20, 0x22, 0x48, 0x6f, 0x73, 0x74, 0x22, 0x3a, 0x20, 0x22, 0x68,
-                       0x74, 0x74, 0x70, 0x62, 0x69, 0x6e, 0x2e, 0x6f, 0x72, 0x67, 0x22, 0x2c, 0x20, 0x0a,
-                       0x20, 0x20, 0x20, 0x20, 0x22, 0x55, 0x73, 0x65, 0x72, 0x2d, 0x41, 0x67, 0x65, 0x6e,
-                       0x74, 0x22, 0x3a, 0x20, 0x22, 0x6c, 0x69, 0x62, 0x63, 0x75, 0x72, 0x6c, 0x2f, 0x37,
-                       0x2e, 0x34, 0x37, 0x2e, 0x31, 0x20, 0x72, 0x2d, 0x63, 0x75, 0x72, 0x6c, 0x2f, 0x30,
-                       0x2e, 0x39, 0x2e, 0x37, 0x20, 0x68, 0x74, 0x74, 0x72, 0x2f, 0x31, 0x2e, 0x32, 0x2e,
-                       0x30, 0x22, 0x0a, 0x20, 0x20, 0x7d, 0x2c, 0x20, 0x0a, 0x20, 0x20, 0x22, 0x6f, 0x72,
-                       0x69, 0x67, 0x69, 0x6e, 0x22, 0x3a, 0x20, 0x22, 0x38, 0x36, 0x2e, 0x31, 0x38, 0x38,
-                       0x2e, 0x32, 0x34, 0x37, 0x2e, 0x32, 0x22, 0x2c, 0x20, 0x0a, 0x20, 0x20, 0x22, 0x75,
-                       0x72, 0x6c, 0x22, 0x3a, 0x20, 0x22, 0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x68,
-                       0x74, 0x74, 0x70, 0x62, 0x69, 0x6e, 0x2e, 0x6f, 0x72, 0x67, 0x2f, 0x67, 0x65, 0x74,
-                       0x22, 0x0a, 0x7d, 0x0a))),
-    .Names = c("url", "status_code", "headers", "modified", "times", "content"))
-
-
+names(cfm_output)
 ```
 
-Now that we have the response stored locally we can begin to mock the
-function `curl_fetch_memory`, by adding the URL that is passed to the
-function `curl_fetch_memory` to a variable `myurl` and using
-`recorded_response` as the output of the mock function.
+We save this into a file now, and put the file into the `testthat`
+directory where the unit tests run.
 
-```{r eval=FALSE}
-test_that("GET works as it should", {
-  myurl <- NULL
-
-  # recorded_response would normally be defined here
-
-  with_mock(
-    `curl::curl_fetch_memory` = function(url, ...) {
-      myurl <<- url
-      recorded_response
-    },
-    {
-      res <- GET("http://httpbin.org/get")
-    }
-  )
-
-})
+```{r}
+save(cfm_output, file = "cfm_output.rda")
 ```
 
-The function `curl_fetch_memory` has been edited to return the exact result
-that it would, if the function `GET("http://httpbin.org/get")` had been
-called, but without connecting to the internet. Now, we can add in
-expectations to be tested.
+Now that we have the response stored locally we can use it to unit test
+`GET()` without connecting to the internet.
 
 ```{r}
 test_that("GET works as it should", {
-  myurl <- NULL
-
-  # recorded_response would need to be defined here
-
-  with_mock(
-    `curl::curl_fetch_memory` = function(url, ...) {
-      myurl <<- url
-      recorded_response
+  response <- with_mock(
+    `curl::curl_fetch_memory` = function(...) {
+	    load("cfm_output.rda")
+      cfm_output
     },
-    {
-      res <- GET("http://httpbin.org/get")
-      cont <- content(res)
-      expect_equal(myurl, "http://httpbin.org/get")  # check the url is correctly passed
-      expect_equal(cont$headers$Host, "httpbin.org")
-      # + more expectations
-    }
+    GET("http://httpbin.org/get")
   )
-
+  expect_silent(stop_for_status(response))
+  expect_equal(headers(response)$`content-type`, "application/json")
+  # ... more tests for the response
 })
 ```
 
-We have successfully tested `GET` without having to connect to a server.
+We have successfully tested `GET()` without having to connect to a server.
 
 ## Primitive Functions
 
 The only problem with using this method is that you may sometimes wish to
-mock a Primitive function, but `with_mock` does not allow you to do this.
+mock a primitive function, but `with_mock` does not allow you to do this.
 
-### Example - `BROWSE`
+### Example - `BROWSE()`
 
 This function is again from the `httr` package and relies on the function
-`browseURL` from the base package `utils` to connect to the internet, so we
-will need to mock this function. This function only runs if `interactive ==
-TRUE`, which it will do when writing the tests. However, the validation
-packages are then run through Jenkins where `interactive == FALSE`, so we
-also need to mock this function to always be `TRUE`. This would be an easy
-thing to do, if the function interactive wasn't a primitive function
-
-```{r}
+`browseURL()` from the base package `utils` to connect to the internet, so we
+will need to mock this function. This function only runs if the R session
+is interactive, i.e. `isTrue(interactive())`, which probably holds when
+*writing* the unit tests, but not when *running* them. 
+It seems straightforward to mock `interactive()` to return `TRUE`, but it
+is a primitive function, so `with_mock()` cannot deal with it:
+```{r, error = TRUE, results = "hide"}
 interactive
-```
-
-If we try to mock this function we receive an error
-
-```{r, error=TRUE}
 with_mock(
-  `interactive` = function(...) TRUE
+  `interactive` = function(...) TRUE,
+  interactive()
 )
 ```
 
-`with_mock` cannot be used for this function. To work around this we must
-mock the function by hand;
+To work around this we must mock the function manually:
 
 ``` {r}
 test_that("Interactive is always TRUE", {
@@ -242,48 +186,33 @@ test_that("Interactive is always TRUE", {
 
 ```
 
-What has been done?
+* We have saved the original version of `interactive()`, so that we can restore it.
+* `unlockBinding()` has allowed us to replace the function in the `base`
+  package with our version.
+* `on.exit()` makes sure that after the test has run, this function is
+  changed back, and  `lockBinding()` seals the `base` package again.
 
-* The function `interactive` has been assigned to variable
-  `interactive_original`
-* `unlockBinding` has allowed us to change the function `interactive`, and
-  `assign` makes sure it will always be `TRUE`
-* `on.exit` makes sure that after the test has run, this function is
-  changed back, and within this `lockBinding` stops any changes being made
-  to the function
+After this, mocking `browseURL()` is already easy, and we leave it
+as an exercise to the reader.
 
-Now, we can add this into our test for `BROWSE`; where we only need to test
-that the URL called as an argument of `BROWSE`, is passed down to
-`utils::browseURL`.
+Note that this method is not allowed for tests in CRAN packages,
+because calling `unlockBinding()` is forbidden there. If you are
+writing tests for your own R package, then a workaround is to define
+your own non-primitive `is_interactive()` function and use (and mock) 
+that in your package:
 
 ```{r}
-test_that("BROWSE opens a specified url in browser", {
-  myurl <- NULL
-
-  interactive_original <- base::interactive
-  on.exit(
-    {
-      assign("interactive", interactive_original, envir = baseenv())
-      lockBinding("interactive", baseenv())
-    },
-    add = TRUE
-  )
-  unlockBinding('interactive', baseenv())
-  assign('interactive', function() TRUE, envir = baseenv())
-
-  with_mock(
-    `utils::browseURL` = function(url, ...){
-      myurl <<- url
-      stop("browseURL does nothing more")
-    },
-    {
-      tryCatch({BROWSE("http://httpbin.org/get")}, error = function(e) e)
-      expect_equal(myurl, "http://httpbin.org/get")
-  })
-})
-
+is_interactive <- function() interactive()
+with_mock(
+  `is_interactive` = function() TRUE,
+  is_interactive()
+)
 ```
 
-We have now successfully tested `BROWSE` by mocking both `utils::browseURL`
-and `interactive`, so that this test will pass without any internet usage
-and from any OS.
+Links
+
+* [This blog post on GitHub](https://github.com/MangoTheCat/blog-with-mock)
+* [The `testthat` R package.](https://github.com/hadley/testthat#readme)
+* [The `httr` R package.](https://github.com/hadley/httr#readme)
+* [The `curl` R package.](https://github.com/jeroenooms/curl#readme)
+* [ValidR](http://www.mango-solutions.com/wp/products-services/products/validr/)
