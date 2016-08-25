@@ -154,7 +154,6 @@ with_mock(
 <p>Consider the function <code>GET()</code> from the <code>httr</code> package, which will perform an HTTP GET request:</p>
 <pre class="r"><code>library(httr)
 response &lt;- GET(&quot;http://httpbin.org/get&quot;)</code></pre>
-<pre><code>## Tracing curl::curl_fetch_memory(url, handle = handle) on exit</code></pre>
 <p>Under the hood <code>GET()</code> uses the <code>curl_fetch_memory()</code> function from the <code>curl</code> package, built on top of <code>libcurl</code>. The job of the <code>GET()</code> function is to call <code>curl</code> with the right arguments, and then process its response properly. So this is what we need to test. (Testing <code>curl</code> itself is another mocking story.)</p>
 <p>If we would like to test that <code>GET()</code> works correctly, without any internet connection, the steps to do this are;</p>
 <ul>
