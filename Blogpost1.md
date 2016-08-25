@@ -21,23 +21,24 @@ do this is by using the method of
 
 Mocking allows you to replace parts of your system under test with mock
 objects and make assertions about how they have been used. The `testthat`
-package supports mocking via the `with_mock()` function, that allows us to
+package supports mocking via the `with_mock()` function. `with_mock()` allows us to
 temporarily replace some R functions. In our case we replace the functions
 that connect to the internet with mock functions that only *pretend* to do
-that.
+so.
 
 ### Simple Example - a system error
 
 Suppose we use the `system()` function to call out to the operating
-system and start some utility. This is a somewhat fragile operation and it
-might fail, so we make sure that we handle errors properly. This is tricky
-in the case of `system()` as it does not signal an R error if the sytem
-function fails, it just returns the exit status of the system shell.
-This is typically non-zero on an error.
+system and start some utility. This is a somewhat fragile operation, it
+might fail if the utility is not available, so we make sure that we 
+handle errors properly. This is somewhat tricky in the case of `system()` as 
+it does not signal an R error if the sytem function fails, it just 
+returns the exit status of the system shell, which is typically
+non-zero on an error.
 
 To test that errors are handled properly, we would need to create an
 environment where the system function indeed fails. While this is not
-impossible, it is much easier to just pretend that it failed using
+impossible, it is much easier to just pretend that it fails using
 `with_mock()`:
 
 
@@ -56,17 +57,18 @@ with_mock(
 )
 ```
 
-We want to test that `ext()` behaves well if a system error happens.
-So we use `with_mock()` to temporarily change `system()`, and pretend
-that it has failed. `with_mock()` takes two kinds of arguments: named and
-unnamed. The named arguments are the mock functions, the names define the
-functions to mock. Unnamed arguments are expressions to evaluate in the
-mocked environment.
+We want to test that `ext()` behaves well if a system error happens,
+and throws a proper R error. We use `with_mock()` to temporarily change
+`system()`, and pretend that it has failed. `with_mock()` takes two kinds
+of arguments: named and unnamed. The named arguments are the mock functions,
+the names define the functions to mock. Unnamed arguments are expressions
+to evaluate in the mocked environment.
 
 ## Using `with_mock` to avoid internet
 
 ### Example - `GET()`
-To explain this, consider the function `GET()` from the `httr` package,
+
+Consider the function `GET()` from the `httr` package,
 which will perform an HTTP GET request:
 
 
@@ -75,13 +77,17 @@ library(httr)
 response <- GET("http://httpbin.org/get")
 ```
 
+```
+## Tracing curl::curl_fetch_memory(url, handle = handle) on exit
+```
+
 Under the hood `GET()` uses the `curl_fetch_memory()` function from the
-`curl` package, built on `libcurl`. The job of the `GET()` function is
-calling `curl` with the right arguments, and then process its response
+`curl` package, built on top of `libcurl`. The job of the `GET()` function is
+to call `curl` with the right arguments, and then process its response
 properly. So this is what we need to test. (Testing `curl` itself is
 another mocking story.)
 
-We would like to test that `GET()` works correctly, without any internet
+If we would like to test that `GET()` works correctly, without any internet
 connection, the steps to do this are;
 
 * Trace `curl_fetch_memory()` to see the input it receives and the
@@ -95,46 +101,18 @@ connection, the steps to do this are;
   `GET()` is correct and provide the recorded output.
 
 For brevity, let's assume that we only use the output of
-`curl_fetch_memory()` now. We trace it and record its return value:
+`curl_fetch_memory()` now. The input can be handled similarly.
+We trace it and record its return value:
 
 
 ```r
+library(curl)
 cfm_output <- NULL
 trace(
-  curl::curl_fetch_memory,
+  curl_fetch_memory,
   exit = function() { cfm_output <<- returnValue() }
 )
-```
-
-```
-## Loading required package: curl
-```
-
-```
-## 
-## Attaching package: 'curl'
-```
-
-```
-## The following object is masked from 'package:httr':
-## 
-##     handle_reset
-```
-
-```
-## Tracing function "curl_fetch_memory" in package "curl"
-```
-
-```
-## [1] "curl_fetch_memory"
-```
-
-```r
 response <- GET("http://httpbin.org/get")
-```
-
-```
-## Tracing curl::curl_fetch_memory(url, handle = handle) on exit
 ```
 
 The return value of `curl_fetch_memory()` is a list that contains the HTTP
@@ -167,7 +145,7 @@ Now that we have the response stored locally we can use it to unit test
 test_that("GET works as it should", {
   response <- with_mock(
     `curl::curl_fetch_memory` = function(...) {
-	  load("cfm_output.rda")
+	    load("cfm_output.rda")
       cfm_output
     },
     GET("http://httpbin.org/get")
@@ -191,26 +169,24 @@ This function is again from the `httr` package and relies on the function
 `browseURL()` from the base package `utils` to connect to the internet, so we
 will need to mock this function. This function only runs if the R session
 is interactive, i.e. `isTrue(interactive())`, which probably holds when
-*writing* the unit tests. However, our ValidR tests run non-interactively.
+*writing* the unit tests, but not when *running* them. 
 It seems straightforward to mock `interactive()` to return `TRUE`, but it
 is a primitive function, so `with_mock()` cannot deal with it:
 
 ```r
 interactive
-```
-
-```
-## function() TRUE
-```
-
-```r
 with_mock(
-  `interactive` = function(...) TRUE
+  `interactive` = function(...) TRUE,
+  interactive()
 )
 ```
 
 ```
-## NULL
+## Error in FUN(X[[i]], ...): old_fun must be a function
+```
+
+```
+## Error in FUN(X[[i]], ...): old_fun must be a function
 ```
 
 To work around this we must mock the function manually:
@@ -234,10 +210,8 @@ test_that("Interactive is always TRUE", {
 })
 ```
 
-What has been done?
-
-* We save the oririnal version of `interactive()`, so that we can restore it.
-* `unlockBinding()` has allowed us to change the function in the `base`
+* We have saved the original version of `interactive()`, so that we can restore it.
+* `unlockBinding()` has allowed us to replace the function in the `base`
   package with our version.
 * `on.exit()` makes sure that after the test has run, this function is
   changed back, and  `lockBinding()` seals the `base` package again.
@@ -245,8 +219,28 @@ What has been done?
 After this, mocking `browseURL()` is already easy, and we leave it
 as an exercise to the reader.
 
+Note that this method is not allowed for tests in CRAN packages,
+because calling `unlockBinding()` is forbidden there. If you are
+writing tests for your own R package, then a workaround is to define
+your own non-primitive `is_interactive()` function and use (and mock) 
+that in your package:
+
+
+```r
+is_interactive <- function() interactive()
+with_mock(
+  `is_interactive` = function() TRUE,
+  is_interactive()
+)
+```
+
+```
+## [1] TRUE
+```
+
 Links
 
+* [This blog post on GitHub](https://github.com/MangoTheCat/blog-with-mock)
 * [The `testthat` R package.](https://github.com/hadley/testthat#readme)
 * [The `httr` R package.](https://github.com/hadley/httr#readme)
 * [The `curl` R package.](https://github.com/jeroenooms/curl#readme)
